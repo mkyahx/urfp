@@ -13,6 +13,9 @@ becomes:
 """
 
 import argparse
+import os
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +24,6 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms as pth_transforms
 from tqdm import tqdm
-
-from networks import get_model
-from object_discovery import ncut
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -34,6 +34,46 @@ TRANSFORM = pth_transforms.Compose(
         pth_transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ]
 )
+
+
+def find_tokencut_root():
+    script_dir = Path(__file__).resolve().parent
+    candidates = []
+
+    env_root = os.environ.get("TOKENCUT_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+
+    candidates.extend(
+        [
+            script_dir,
+            script_dir / "TokenCut",
+            script_dir.parent / "TokenCut",
+        ]
+    )
+
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if (candidate / "networks.py").exists() and (
+            candidate / "object_discovery.py"
+        ).exists():
+            return candidate
+
+    searched = "\n".join(f"  - {path}" for path in candidates)
+    raise ModuleNotFoundError(
+        "Could not find TokenCut source files `networks.py` and "
+        "`object_discovery.py`.\n"
+        "Run this script from the TokenCut repo root, or set:\n"
+        "  TOKENCUT_ROOT=/path/to/TokenCut\n"
+        f"Searched:\n{searched}"
+    )
+
+
+TOKENCUT_ROOT = find_tokencut_root()
+sys.path.insert(0, str(TOKENCUT_ROOT))
+
+from networks import get_model
+from object_discovery import ncut
 
 
 def parse_args():
@@ -113,6 +153,17 @@ def parse_args():
         action="store_true",
         help="Save the raw patch-grid mask instead of upsampling to image size.",
     )
+    parser.add_argument(
+        "--limit",
+        default=None,
+        type=int,
+        help="Only process the first N images after sorting. Useful for debugging.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print per-image timing for load, ViT forward, NCut, and save.",
+    )
     return parser.parse_args()
 
 
@@ -185,6 +236,24 @@ def upsample_mask(mask, original_size):
     return upsampled[0, 0].cpu().numpy().astype(np.uint8)
 
 
+def bbox_from_mask(mask):
+    """
+    Compute [xmin, ymin, xmax, ymax] from an image-space binary mask.
+    Returns a float32 array of shape (4,).
+    """
+    mask = np.asarray(mask)
+    if mask.ndim != 2:
+        mask = np.squeeze(mask)
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0 or ys.size == 0:
+        return np.asarray([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    xmin = float(xs.min())
+    xmax = float(xs.max() + 1)
+    ymin = float(ys.min())
+    ymax = float(ys.max() + 1)
+    return np.asarray([xmin, ymin, xmax, ymax], dtype=np.float32)
+
+
 def main():
     args = parse_args()
     image_root = args.image_root.resolve()
@@ -199,10 +268,14 @@ def main():
         raise FileNotFoundError(f"Image root does not exist: {image_root}")
 
     image_paths = list(iter_images(image_root))
+    if args.limit is not None:
+        image_paths = image_paths[: args.limit]
     if not image_paths:
         raise RuntimeError(f"No images found under: {image_root}")
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    print(f"Using device: {device}")
+    print(f"Using TokenCut root: {TOKENCUT_ROOT}")
     model = get_model(args.arch, args.patch_size, device)
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -215,7 +288,23 @@ def main():
 
         if output_path.exists() and bbox_output_path.exists() and not args.overwrite:
             continue
+        if output_path.exists() and (not bbox_output_path.exists()) and (not args.overwrite):
+            start_time = time.perf_counter()
+            # Fast path: derive bbox from an already-generated image-space mask.
+            # This avoids re-running the expensive TokenCut NCut step.
+            try:
+                existing_mask = np.load(output_path)
+                bbox_output_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(bbox_output_path, bbox_from_mask(existing_mask))
+                if args.profile:
+                    elapsed = time.perf_counter() - start_time
+                    print(f"{rel_path}: bbox_from_existing_mask={elapsed:.3f}s")
+                continue
+            except Exception:
+                # If the stored mask is unreadable, fall back to full recompute.
+                pass
 
+        load_start = time.perf_counter()
         img, original_size = load_image_tensor(image_path)
         init_image_size = img.shape
         img = pad_to_patch_multiple(img, args.patch_size)
@@ -228,7 +317,9 @@ def main():
         scales = [args.patch_size, args.patch_size]
 
         with torch.no_grad():
+            vit_start = time.perf_counter()
             feats = get_vit_features(model, img, args.arch, args.which_features)
+            ncut_start = time.perf_counter()
             bbox, _, foreground, _, _, _ = ncut(
                 feats,
                 [w_featmap, h_featmap],
@@ -239,7 +330,9 @@ def main():
                 im_name=str(rel_path),
                 no_binary_graph=args.no_binary_graph,
             )
+            post_ncut_time = time.perf_counter()
 
+        save_start = time.perf_counter()
         mask = foreground.astype(np.uint8)
         if not args.save_patch_mask:
             mask = upsample_mask(mask, original_size)
@@ -247,7 +340,24 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_path, mask)
         bbox_output_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(bbox_output_path, np.asarray(bbox, dtype=np.float32))
+        # If we saved an image-space mask, compute bbox from it for consistency.
+        # (When saving patch-grid masks, keep the TokenCut box.)
+        if not args.save_patch_mask:
+            np.save(bbox_output_path, bbox_from_mask(mask))
+        else:
+            np.save(bbox_output_path, np.asarray(bbox, dtype=np.float32))
+
+        if args.profile:
+            save_end = time.perf_counter()
+            print(
+                f"{rel_path}: "
+                f"load={vit_start - load_start:.3f}s "
+                f"vit={ncut_start - vit_start:.3f}s "
+                f"ncut={post_ncut_time - ncut_start:.3f}s "
+                f"save={save_end - save_start:.3f}s "
+                f"total={save_end - load_start:.3f}s "
+                f"patches={w_featmap * h_featmap}"
+            )
 
     print(f"Saved masks to: {output_root}")
     print(f"Saved bounding boxes to: {bbox_output_root}")
