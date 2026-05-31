@@ -1,7 +1,7 @@
 """
-Generate TokenCut masks for a CUB-style image directory.
+Generate TokenCut masks and bounding boxes for a CUB-style image directory.
 
-The output mirrors the input directory tree and replaces image extensions with
+The outputs mirror the input directory tree and replace image extensions with
 .npy files. For example:
 
     CUB_200_2011/images/001.Black_footed_Albatross/foo.jpg
@@ -9,6 +9,7 @@ The output mirrors the input directory tree and replaces image extensions with
 becomes:
 
     output_masks/001.Black_footed_Albatross/foo.npy
+    output_bboxes/001.Black_footed_Albatross/foo.npy
 """
 
 import argparse
@@ -50,6 +51,15 @@ def parse_args():
         required=True,
         type=Path,
         help="Root folder for output .npy masks.",
+    )
+    parser.add_argument(
+        "--bbox-output-root",
+        default=None,
+        type=Path,
+        help=(
+            "Root folder for output bbox .npy files. Defaults to "
+            "<output-root>_bboxes."
+        ),
     )
     parser.add_argument(
         "--arch",
@@ -179,6 +189,11 @@ def main():
     args = parse_args()
     image_root = args.image_root.resolve()
     output_root = args.output_root.resolve()
+    bbox_output_root = (
+        args.bbox_output_root.resolve()
+        if args.bbox_output_root is not None
+        else output_root.with_name(f"{output_root.name}_bboxes")
+    )
 
     if not image_root.exists():
         raise FileNotFoundError(f"Image root does not exist: {image_root}")
@@ -191,12 +206,14 @@ def main():
     model = get_model(args.arch, args.patch_size, device)
 
     output_root.mkdir(parents=True, exist_ok=True)
+    bbox_output_root.mkdir(parents=True, exist_ok=True)
 
     for image_path in tqdm(image_paths, desc="Generating masks"):
         rel_path = image_path.relative_to(image_root)
         output_path = output_root / rel_path.with_suffix(".npy")
+        bbox_output_path = bbox_output_root / rel_path.with_suffix(".npy")
 
-        if output_path.exists() and not args.overwrite:
+        if output_path.exists() and bbox_output_path.exists() and not args.overwrite:
             continue
 
         img, original_size = load_image_tensor(image_path)
@@ -212,7 +229,7 @@ def main():
 
         with torch.no_grad():
             feats = get_vit_features(model, img, args.arch, args.which_features)
-            _, _, foreground, _, _, _ = ncut(
+            bbox, _, foreground, _, _, _ = ncut(
                 feats,
                 [w_featmap, h_featmap],
                 scales,
@@ -229,8 +246,11 @@ def main():
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_path, mask)
+        bbox_output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(bbox_output_path, np.asarray(bbox, dtype=np.float32))
 
     print(f"Saved masks to: {output_root}")
+    print(f"Saved bounding boxes to: {bbox_output_root}")
 
 
 if __name__ == "__main__":

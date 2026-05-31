@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 # Change these two paths if your CUB images or desired mask output are elsewhere.
 IMAGE_ROOT="${IMAGE_ROOT:-datasets/CUB/CUB_200_2011/images}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-datasets/CUB/CUB_200_2011_tokencut_masks}"
+BBOX_OUTPUT_ROOT="${BBOX_OUTPUT_ROOT:-datasets/CUB/CUB_200_2011_tokencut_bboxes}"
 
 # TokenCut / DINO settings.
 ARCH="${ARCH:-vit_small}"
@@ -21,6 +22,7 @@ EPS="${EPS:-1e-5}"
 python batch_cub_masks.py \
   --image-root "$IMAGE_ROOT" \
   --output-root "$OUTPUT_ROOT" \
+  --bbox-output-root "$BBOX_OUTPUT_ROOT" \
   --arch "$ARCH" \
   --patch-size "$PATCH_SIZE" \
   --which-features "$WHICH_FEATURES" \
