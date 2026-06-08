@@ -1,5 +1,5 @@
 """
-Generate TokenCut masks for a CUB-style image directory.
+Generate TokenCut masks for an image directory.
 
 The output mirrors the input directory tree and replaces image extensions with
 .npy files. For example:
@@ -12,6 +12,8 @@ becomes:
 """
 
 import argparse
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +22,6 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms as pth_transforms
 from tqdm import tqdm
-
-from networks import get_model
-from object_discovery import ncut
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -35,15 +34,55 @@ TRANSFORM = pth_transforms.Compose(
 )
 
 
+def find_tokencut_root():
+    script_dir = Path(__file__).resolve().parent
+    candidates = []
+
+    env_root = os.environ.get("TOKENCUT_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+
+    candidates.extend(
+        [
+            script_dir,
+            script_dir / "TokenCut",
+            script_dir.parent / "TokenCut",
+        ]
+    )
+
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if (candidate / "networks.py").exists() and (
+            candidate / "object_discovery.py"
+        ).exists():
+            return candidate
+
+    searched = "\n".join(f"  - {path}" for path in candidates)
+    raise ModuleNotFoundError(
+        "Could not find TokenCut source files `networks.py` and "
+        "`object_discovery.py`.\n"
+        "Run this script from the TokenCut repo root, or set:\n"
+        "  TOKENCUT_ROOT=/path/to/TokenCut\n"
+        f"Searched:\n{searched}"
+    )
+
+
+TOKENCUT_ROOT = find_tokencut_root()
+sys.path.insert(0, str(TOKENCUT_ROOT))
+
+from networks import get_model
+from object_discovery import ncut
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Batch-generate TokenCut masks for CUB images."
+        description="Batch-generate TokenCut masks for an image directory."
     )
     parser.add_argument(
         "--image-root",
         required=True,
         type=Path,
-        help="Root image folder, usually CUB_200_2011/images.",
+        help="Root image folder. The output mirrors this directory tree.",
     )
     parser.add_argument(
         "--output-root",

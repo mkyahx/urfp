@@ -1,5 +1,5 @@
 """
-Generate TokenCut bounding boxes for a CUB-style image directory.
+Generate TokenCut bounding boxes for an image directory.
 
 The output mirrors the input directory tree and replaces image extensions with
 .npy files. Each .npy stores [xmin, ymin, xmax, ymax] in image coordinates.
@@ -70,13 +70,13 @@ from object_discovery import ncut
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Batch-generate TokenCut bbox npy files for CUB images."
+        description="Batch-generate TokenCut bbox npy files for an image directory."
     )
     parser.add_argument(
         "--image-root",
         required=True,
         type=Path,
-        help="Root image folder, usually CUB_200_2011/images.",
+        help="Root image folder. The output mirrors this directory tree.",
     )
     parser.add_argument(
         "--output-root",
