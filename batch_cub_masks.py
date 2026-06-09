@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+RESAMPLE_BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 
 TRANSFORM = pth_transforms.Compose(
     [
@@ -142,6 +143,12 @@ def parse_args():
         action="store_true",
         help="Save the raw patch-grid mask instead of upsampling to image size.",
     )
+    parser.add_argument(
+        "--max-size",
+        default=None,
+        type=int,
+        help="Resize the longest image side to this value before running TokenCut.",
+    )
     return parser.parse_args()
 
 
@@ -151,10 +158,30 @@ def iter_images(image_root):
             yield path
 
 
-def load_image_tensor(image_path):
+def resize_image_if_needed(image, max_size):
+    original_size = image.size
+    if max_size is None:
+        return image, original_size
+    if max_size <= 0:
+        raise ValueError("--max-size must be a positive integer.")
+
+    width, height = original_size
+    longest_side = max(width, height)
+    if longest_side <= max_size:
+        return image, original_size
+
+    scale = max_size / longest_side
+    resized_size = (
+        max(1, int(round(width * scale))),
+        max(1, int(round(height * scale))),
+    )
+    return image.resize(resized_size, RESAMPLE_BICUBIC), original_size
+
+
+def load_image_tensor(image_path, max_size):
     with Image.open(image_path) as image:
         image = image.convert("RGB")
-        original_size = image.size  # PIL: (width, height)
+        image, original_size = resize_image_if_needed(image, max_size)
         tensor = TRANSFORM(image)
     return tensor, original_size
 
@@ -238,7 +265,7 @@ def main():
         if output_path.exists() and not args.overwrite:
             continue
 
-        img, original_size = load_image_tensor(image_path)
+        img, original_size = load_image_tensor(image_path, args.max_size)
         init_image_size = img.shape
         img = pad_to_patch_multiple(img, args.patch_size)
 

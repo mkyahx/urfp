@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+RESAMPLE_BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 
 TRANSFORM = pth_transforms.Compose(
     [
@@ -135,6 +136,12 @@ def parse_args():
         action="store_true",
         help="Print per-image timing for load, ViT forward, NCut, and save.",
     )
+    parser.add_argument(
+        "--max-size",
+        default=None,
+        type=int,
+        help="Resize the longest image side to this value before running TokenCut.",
+    )
     return parser.parse_args()
 
 
@@ -144,11 +151,46 @@ def iter_images(image_root):
             yield path
 
 
-def load_image_tensor(image_path):
+def resize_image_if_needed(image, max_size):
+    original_size = image.size
+    if max_size is None:
+        return image, original_size, original_size
+    if max_size <= 0:
+        raise ValueError("--max-size must be a positive integer.")
+
+    width, height = original_size
+    longest_side = max(width, height)
+    if longest_side <= max_size:
+        return image, original_size, original_size
+
+    scale = max_size / longest_side
+    resized_size = (
+        max(1, int(round(width * scale))),
+        max(1, int(round(height * scale))),
+    )
+    return image.resize(resized_size, RESAMPLE_BICUBIC), original_size, resized_size
+
+
+def load_image_tensor(image_path, max_size):
     with Image.open(image_path) as image:
         image = image.convert("RGB")
+        image, original_size, resized_size = resize_image_if_needed(image, max_size)
         tensor = TRANSFORM(image)
-    return tensor
+    return tensor, original_size, resized_size
+
+
+def scale_bbox_to_original(bbox, resized_size, original_size):
+    bbox = np.asarray(bbox, dtype=np.float32).copy()
+    resized_width, resized_height = resized_size
+    original_width, original_height = original_size
+    if resized_size == original_size:
+        return bbox
+
+    bbox[[0, 2]] *= original_width / resized_width
+    bbox[[1, 3]] *= original_height / resized_height
+    bbox[[0, 2]] = np.clip(bbox[[0, 2]], 0, original_width)
+    bbox[[1, 3]] = np.clip(bbox[[1, 3]], 0, original_height)
+    return bbox
 
 
 def pad_to_patch_multiple(img, patch_size):
@@ -228,7 +270,7 @@ def main():
             continue
 
         load_start = time.perf_counter()
-        img = load_image_tensor(image_path)
+        img, original_size, resized_size = load_image_tensor(image_path, args.max_size)
         init_image_size = img.shape
         img = pad_to_patch_multiple(img, args.patch_size)
 
@@ -257,7 +299,7 @@ def main():
 
         save_start = time.perf_counter()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(output_path, np.asarray(bbox, dtype=np.float32))
+        np.save(output_path, scale_bbox_to_original(bbox, resized_size, original_size))
 
         if args.profile:
             save_end = time.perf_counter()

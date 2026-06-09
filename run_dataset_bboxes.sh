@@ -18,13 +18,21 @@ PATCH_SIZE="${PATCH_SIZE:-16}"
 WHICH_FEATURES="${WHICH_FEATURES:-k}"
 TAU="${TAU:-0.2}"
 EPS="${EPS:-1e-5}"
+MAX_SIZE="${MAX_SIZE:-}"
 
-python batch_cub_bboxes.py \
-  --image-root "$IMAGE_ROOT" \
-  --output-root "$OUTPUT_ROOT" \
-  --arch "$ARCH" \
-  --patch-size "$PATCH_SIZE" \
-  --which-features "$WHICH_FEATURES" \
-  --tau "$TAU" \
-  --eps "$EPS" \
-  "$@"
+cmd=(
+  python batch_cub_bboxes.py
+  --image-root "$IMAGE_ROOT"
+  --output-root "$OUTPUT_ROOT"
+  --arch "$ARCH"
+  --patch-size "$PATCH_SIZE"
+  --which-features "$WHICH_FEATURES"
+  --tau "$TAU"
+  --eps "$EPS"
+)
+
+if [[ -n "$MAX_SIZE" ]]; then
+  cmd+=(--max-size "$MAX_SIZE")
+fi
+
+"${cmd[@]}" "$@"
